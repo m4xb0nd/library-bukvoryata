@@ -1,0 +1,15 @@
+{{define "content"}}
+<h1 class="big-title">
+  <span class="line-1">Здесь есть</span>
+  <span class="line-2">книги, которые</span>
+  <span class="line-3">кто-то оставил...</span>
+</h1>
+
+<p>В каталоге названий: {{.Data.Titles}}, сейчас на руках: {{.Data.ActiveLoans}}.</p>
+<p><a class="button" href="/books">Открыть книги</a></p>
+
+<div class="heroes">
+  <img src="/static/img/книга1.png" alt="Удивлённая книга">
+  <img src="/static/img/книга2.png" alt="Книга-зомби">
+</div>
+{{end}}

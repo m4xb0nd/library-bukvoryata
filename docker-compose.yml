@@ -1,0 +1,10 @@
+services:
+  library:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      LIBRARY_PASSWORD: "change-me"      # пароль библиотекаря
+    volumes:
+      - ./data:/app/data                 # данные сохраняются между запусками
+      - ./static:/app/static             # ваши рисунки и стили подхватываются без пересборки

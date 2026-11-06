@@ -1,0 +1,34 @@
+{{define "content"}}
+<p class="row">
+  <a class="button" href="/loans/new">Выдать книгу</a>
+  {{if .Data.All}}
+    <a class="button alt" href="/loans">Только на руках</a>
+  {{else}}
+    <a class="button alt" href="/loans?all=1">Показать всю историю</a>
+  {{end}}
+</p>
+
+{{if .Data.Loans}}
+<table>
+  <tr><th>Книга</th><th>Читатель</th><th>Выдана</th><th>Срок</th><th>Состояние</th><th></th></tr>
+  {{range .Data.Loans}}
+  <tr{{if .Overdue}} class="overdue"{{end}}>
+    <td><a href="/books/{{.BookID}}">{{.BookTitle}}</a></td>
+    <td><a href="/readers/{{.ReaderID}}">{{.ReaderName}}</a> ({{.ReaderTicket}})</td>
+    <td>{{date .IssuedAt}}</td>
+    <td>{{date .DueAt}}</td>
+    <td>{{if .ReturnedAt}}возвращена {{date .ReturnedAt}}{{else if .Overdue}}просрочена{{else}}на руках{{end}}</td>
+    <td>
+      {{if not .ReturnedAt}}
+      <form method="post" action="/loans/{{.ID}}/return" class="inline">
+        <button class="button small">Принять возврат</button>
+      </form>
+      {{end}}
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<p>Записей нет.</p>
+{{end}}
+{{end}}

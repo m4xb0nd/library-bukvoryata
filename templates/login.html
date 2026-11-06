@@ -1,0 +1,12 @@
+{{define "content"}}
+<div class="with-picture">
+  <form method="post" action="/login" class="form">
+    <input type="hidden" name="next" value="{{.Data}}">
+    <label>Пароль библиотекаря
+      <input type="password" name="password" autofocus required>
+    </label>
+    <p><button class="button">Войти</button></p>
+  </form>
+  <img src="/static/img/книга3.png" alt="Старый книжный библиотекарь">
+</div>
+{{end}}

@@ -1,0 +1,22 @@
+{{define "content"}}
+<table class="details">
+  <tr><th>Автор</th><td>{{.Data.Author}}</td></tr>
+  <tr><th>Жанр</th><td>{{.Data.Genre}}</td></tr>
+  <tr><th>Год издания</th><td>{{.Data.Year}}</td></tr>
+  {{if .Data.ISBN}}<tr><th>ISBN</th><td>{{.Data.ISBN}}</td></tr>{{end}}
+  <tr><th>Экземпляры</th><td>{{if gt .Data.Available 0}}свободно {{.Data.Available}} из {{.Data.Copies}}{{else}}все {{.Data.Copies}} на руках{{end}}</td></tr>
+</table>
+
+{{if .Data.Description}}<p>{{.Data.Description}}</p>{{end}}
+
+<p class="row">
+  <a class="button alt" href="/books">К каталогу</a>
+  {{if .IsAdmin}}
+    {{if gt .Data.Available 0}}<a class="button" href="/loans/new?book={{.Data.ID}}">Выдать читателю</a>{{end}}
+    <form method="post" action="/books/{{.Data.ID}}/delete" class="inline"
+          onsubmit="return confirm('Удалить книгу из каталога?')">
+      <button class="button danger">Удалить</button>
+    </form>
+  {{end}}
+</p>
+{{end}}

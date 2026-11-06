@@ -1,0 +1,37 @@
+{{define "base"}}<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} - Букварята</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<header class="header">
+  <a class="logo" href="/">Букварята</a>
+  <nav class="menu">
+    {{range .Nav}}<a href="{{.Href}}"{{if eq $.Active .Key}} class="active"{{end}}>{{.Label}}</a>
+    {{end}}
+  </nav>
+</header>
+
+<main class="page page-{{.Active}}">
+  {{if .Msg}}<p class="notice ok">{{.Msg}}</p>{{end}}
+  {{if .Err}}<p class="notice bad">{{.Err}}</p>{{end}}
+  {{if ne .Active "home"}}<h1>{{.Title}}</h1>{{end}}
+  {{template "content" .}}
+</main>
+
+<footer class="footer">
+  Букварята · учебный проект ·
+  {{if .IsAdmin}}
+    режим библиотекаря
+    <form method="post" action="/logout" class="inline"><button class="link-button">Выйти</button></form>
+  {{else}}
+    <a href="/login">Вход для библиотекаря</a>
+  {{end}}
+</footer>
+
+</body>
+</html>{{end}}

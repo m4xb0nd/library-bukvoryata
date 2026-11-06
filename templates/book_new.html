@@ -1,0 +1,32 @@
+{{define "content"}}
+<form method="post" action="/books/new" class="form">
+  <label>Название
+    <input name="title" value="{{.Data.F.Title}}" maxlength="200" required>
+  </label>
+  <label>Автор
+    <input name="author" value="{{.Data.F.Author}}" maxlength="150" required>
+  </label>
+  <label>Жанр
+    <select name="genre" required>
+      <option value="">- выберите -</option>
+      {{range .Data.Genres}}<option value="{{.ID}}"{{if eq (printf "%d" .ID) $.Data.F.Genre}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+  </label>
+  <label>Год издания
+    <input type="number" name="year" value="{{.Data.F.Year}}" min="1000" required>
+  </label>
+  <label>Количество экземпляров
+    <input type="number" name="copies" value="{{.Data.F.Copies}}" min="1" max="1000" required>
+  </label>
+  <label>ISBN (необязательно)
+    <input name="isbn" value="{{.Data.F.ISBN}}" maxlength="20">
+  </label>
+  <label>Описание (необязательно)
+    <textarea name="description" rows="4" maxlength="2000">{{.Data.F.Description}}</textarea>
+  </label>
+  <p class="row">
+    <button class="button">Сохранить</button>
+    <a class="button alt" href="/books">Отмена</a>
+  </p>
+</form>
+{{end}}

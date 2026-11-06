@@ -1,0 +1,21 @@
+{{define "content"}}
+<form method="post" action="/loans/new" class="form">
+  <label>Книга (показаны только книги со свободными экземплярами)
+    <select name="book" required>
+      <option value="">- выберите -</option>
+      {{range .Data.Books}}<option value="{{.ID}}"{{if eq .ID $.Data.Book}} selected{{end}}>{{.Title}} — {{.Author}} (свободно {{.Available}})</option>{{end}}
+    </select>
+  </label>
+  <label>Читатель
+    <select name="reader" required>
+      <option value="">- выберите -</option>
+      {{range .Data.Readers}}<option value="{{.ID}}"{{if eq .ID $.Data.Reader}} selected{{end}}>{{.Ticket}} · {{.FullName}}</option>{{end}}
+    </select>
+  </label>
+  <p>Срок возврата — {{.Data.Days}} дней с сегодняшнего дня.</p>
+  <p class="row">
+    <button class="button">Выдать</button>
+    <a class="button alt" href="/loans">Отмена</a>
+  </p>
+</form>
+{{end}}

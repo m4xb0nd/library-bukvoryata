@@ -1,0 +1,18 @@
+{{define "content"}}
+<form method="post" action="/readers/new" class="form">
+  <label>ФИО
+    <input name="full_name" value="{{.Data.FullName}}" maxlength="150" required>
+  </label>
+  <label>Телефон (необязательно)
+    <input name="phone" value="{{.Data.Phone}}" maxlength="30">
+  </label>
+  <label>Электронная почта (необязательно)
+    <input name="email" value="{{.Data.Email}}" maxlength="100">
+  </label>
+  <p>Номер читательского билета будет присвоен автоматически.</p>
+  <p class="row">
+    <button class="button">Зарегистрировать</button>
+    <a class="button alt" href="/readers">Отмена</a>
+  </p>
+</form>
+{{end}}

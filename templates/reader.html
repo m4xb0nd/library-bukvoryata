@@ -1,0 +1,31 @@
+{{define "content"}}
+<table class="details">
+  <tr><th>Билет</th><td>{{.Data.Reader.Ticket}}</td></tr>
+  <tr><th>Телефон</th><td>{{if .Data.Reader.Phone}}{{.Data.Reader.Phone}}{{else}}—{{end}}</td></tr>
+  <tr><th>Почта</th><td>{{if .Data.Reader.Email}}{{.Data.Reader.Email}}{{else}}—{{end}}</td></tr>
+  <tr><th>Зарегистрирован</th><td>{{date .Data.Reader.RegisteredAt}}</td></tr>
+  <tr><th>Книг на руках</th><td>{{.Data.Reader.Active}}</td></tr>
+</table>
+
+<p class="row">
+  <a class="button" href="/loans/new?reader={{.Data.Reader.ID}}">Выдать книгу</a>
+  <a class="button alt" href="/readers">К списку</a>
+</p>
+
+<h2>История выдач</h2>
+{{if .Data.Loans}}
+<table>
+  <tr><th>Книга</th><th>Выдана</th><th>Срок</th><th>Возвращена</th></tr>
+  {{range .Data.Loans}}
+  <tr{{if .Overdue}} class="overdue"{{end}}>
+    <td>{{.BookTitle}}</td>
+    <td>{{date .IssuedAt}}</td>
+    <td>{{date .DueAt}}</td>
+    <td>{{if .ReturnedAt}}{{date .ReturnedAt}}{{else if .Overdue}}просрочена{{else}}на руках{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<p>Книг ещё не выдавали.</p>
+{{end}}
+{{end}}
