@@ -6,7 +6,7 @@
 
 ```bash
 go run .                       # http://localhost:8080
-LIBRARY_PASSWORD=мой-пароль go run .
+LIBRARY_PASSWORD=admin go run .
 ```
 
 Через Docker:
