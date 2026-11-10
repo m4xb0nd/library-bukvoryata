@@ -1,10 +1,32 @@
 services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: library
+      POSTGRES_PASSWORD: library
+      POSTGRES_DB: library
+    volumes:
+      - dbdata:/var/lib/postgresql/data  
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U library -d library"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      ports:
+      - "5432:5432"
+
   library:
     build: .
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
-      LIBRARY_PASSWORD: "change-me"      # пароль библиотекаря
+      LIBRARY_PASSWORD: "admin"      
+      DATABASE_URL: "postgres://library:library@db:5432/library?sslmode=disable"
     volumes:
-      - ./data:/app/data                 # данные сохраняются между запусками
-      - ./static:/app/static             # ваши рисунки и стили подхватываются без пересборки
+      - ./static:/app/static             
+
+volumes:
+  dbdata:

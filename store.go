@@ -1,72 +1,77 @@
 package main
 
 import (
-	"encoding/json"
+	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
+	"log"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/lib/pq" 
 )
+
 
 const (
 	LoanDays       = 14 
 	MaxActiveLoans = 5  
+)
+
+//go:embed schema.sql
+var schemaSQL string
+
+//go:embed data.sql
+var dataSQL string
+
 
 
 type Genre struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
-}
-
-type Author struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID   int
+	Name string
 }
 
 type Book struct {
-	ID          int    `json:"id"`
-	Title       string `json:"title"`
-	AuthorID    int    `json:"author_id"`
-	GenreID     int    `json:"genre_id"`
-	Year        int    `json:"year"`
-	ISBN        string `json:"isbn"`
-	Description string `json:"description"`
-	Copies      int    `json:"copies"`
+	ID          int
+	Title       string
+	AuthorID    int
+	GenreID     int
+	Year        int
+	ISBN        string
+	Description string
+	Copies      int
 }
 
 type Reader struct {
-	ID           int       `json:"id"`
-	Ticket       string    `json:"ticket"`
-	FullName     string    `json:"full_name"`
-	Phone        string    `json:"phone"`
-	Email        string    `json:"email"`
-	RegisteredAt time.Time `json:"registered_at"`
+	ID           int
+	Ticket       string
+	FullName     string
+	Phone        string
+	Email        string
+	RegisteredAt time.Time
 }
 
 type Loan struct {
-	ID         int        `json:"id"`
-	BookID     int        `json:"book_id"`
-	ReaderID   int        `json:"reader_id"`
-	IssuedAt   time.Time  `json:"issued_at"`
-	DueAt      time.Time  `json:"due_at"`
-	ReturnedAt *time.Time `json:"returned_at"`
+	ID         int
+	BookID     int
+	ReaderID   int
+	IssuedAt   time.Time
+	DueAt      time.Time
+	ReturnedAt *time.Time 
 }
+
 
 type BookView struct {
 	Book
 	Author    string
 	Genre     string
-	Available int
+	Available int 
 }
 
 type ReaderView struct {
 	Reader
-	Active int
+	Active int 
 }
 
 type LoanView struct {
@@ -81,21 +86,6 @@ type Stats struct {
 	Titles, Copies, Readers, ActiveLoans, OverdueLoans int
 }
 
-type data struct {
-	NextID  map[string]int `json:"next_id"`
-	Genres  []Genre        `json:"genres"`
-	Authors []Author       `json:"authors"`
-	Books   []Book         `json:"books"`
-	Readers []Reader       `json:"readers"`
-	Loans   []Loan         `json:"loans"`
-}
-
-type Store struct {
-	mu   sync.RWMutex
-	path string
-	d    data
-}
-
 type ErrUser struct{ Msg string }
 
 func (e ErrUser) Error() string { return e.Msg }
@@ -107,282 +97,250 @@ func IsUserErr(err error) bool {
 	return errors.As(err, &e)
 }
 
-func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path}
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		s.seed()
-		if err := s.save(); err != nil {
-			return nil, err
-		}
-		return s, nil
+func pgCode(err error) string {
+	var pe *pq.Error
+	if errors.As(err, &pe) {
+		return string(pe.Code)
 	}
-	if err := s.load(); err != nil {
+	return ""
+}
+
+const (
+	codeUnique     = "23505"
+	codeForeignKey = "23503"
+)
+
+type Store struct {
+	db *sql.DB
+}
+
+
+func OpenStore(dsn string) (*Store, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+
+	for i := 1; ; i++ {
+		if err = db.Ping(); err == nil {
+			break
+		}
+		if i == 30 {
+			return nil, fmt.Errorf("не удалось подключиться к базе данных: %w", err)
+		}
+		log.Println("жду базу данных:", err)
+		time.Sleep(time.Second)
+	}
+
+	s := &Store{db: db}
+	if err := s.initSchema(); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Store) load() error {
-	raw, err := os.ReadFile(s.path)
+func (s *Store) initSchema() error {
+	var exists bool
+	if err := s.db.QueryRow(`SELECT to_regclass('public.books') IS NOT NULL`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	log.Println("таблиц нет — создаю схему и начальные данные")
+
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	var d data
-	if err := json.Unmarshal(raw, &d); err != nil {
-		return fmt.Errorf("файл данных %s повреждён: %w", s.path, err)
+	defer tx.Rollback()
+	if _, err := tx.Exec(schemaSQL); err != nil {
+		return fmt.Errorf("schema.sql: %w", err)
 	}
-	if d.NextID == nil {
-		d.NextID = map[string]int{}
+	if _, err := tx.Exec(dataSQL); err != nil {
+		return fmt.Errorf("data.sql: %w", err)
 	}
-	s.d = d
-	return nil
+	return tx.Commit()
 }
 
-func (s *Store) save() error {
-	raw, err := json.MarshalIndent(s.d, "", "  ")
+func likePattern(q string) string {
+	esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.TrimSpace(q))
+	return "%" + esc + "%"
+}
+
+
+func (s *Store) Genres() ([]Genre, error) {
+	rows, err := s.db.Query(`SELECT genre_id, name FROM genres ORDER BY genre_id`)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
-}
-
-func (s *Store) commit() error {
-	if err := s.save(); err != nil {
-		_ = s.load()
-		return fmt.Errorf("не удалось сохранить данные: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) next(kind string) int {
-	s.d.NextID[kind]++
-	return s.d.NextID[kind]
-}
-
-func (s *Store) seed() {
-	s.d = data{NextID: map[string]int{}}
-	genres := map[string]int{}
-	for _, n := range []string{"Роман", "Повесть", "Рассказ", "Поэзия", "Драма", "Научная литература", "Детская литература"} {
-		id := s.next("genre")
-		s.d.Genres = append(s.d.Genres, Genre{id, n})
-		genres[n] = id
-	}
-	authors := map[string]int{}
-	add := func(title, author, genre string, year, copies int) {
-		aid, ok := authors[author]
-		if !ok {
-			aid = s.next("author")
-			s.d.Authors = append(s.d.Authors, Author{aid, author})
-			authors[author] = aid
+	defer rows.Close()
+	var out []Genre
+	for rows.Next() {
+		var g Genre
+		if err := rows.Scan(&g.ID, &g.Name); err != nil {
+			return nil, err
 		}
-		s.d.Books = append(s.d.Books, Book{
-			ID: s.next("book"), Title: title, AuthorID: aid,
-			GenreID: genres[genre], Year: year, Copies: copies,
-		})
+		out = append(out, g)
 	}
-	add("Евгений Онегин", "А. С. Пушкин", "Поэзия", 1833, 3)
-	add("Капитанская дочка", "А. С. Пушкин", "Повесть", 1836, 3)
-	add("Герой нашего времени", "М. Ю. Лермонтов", "Роман", 1840, 2)
-	add("Ревизор", "Н. В. Гоголь", "Драма", 1836, 2)
-	add("Преступление и наказание", "Ф. М. Достоевский", "Роман", 1866, 2)
-	add("Война и мир", "Л. Н. Толстой", "Роман", 1869, 2)
-	add("Вишнёвый сад", "А. П. Чехов", "Драма", 1904, 2)
-	add("Мастер и Маргарита", "М. А. Булгаков", "Роман", 1967, 1)
-
-	id := s.next("reader")
-	s.d.Readers = append(s.d.Readers, Reader{
-		ID: id, Ticket: ticketNumber(id), FullName: "Иванов Иван Иванович",
-		Phone: "+7 900 000-00-00", RegisteredAt: time.Now(),
-	})
+	return out, rows.Err()
 }
 
-func ticketNumber(id int) string { return fmt.Sprintf("ЧБ-%05d", id) }
-
-func (s *Store) activeLoansOfBook(bookID int) int {
-	n := 0
-	for _, l := range s.d.Loans {
-		if l.BookID == bookID && l.ReturnedAt == nil {
-			n++
-		}
-	}
-	return n
+func (s *Store) Stats() (Stats, error) {
+	var st Stats
+	err := s.db.QueryRow(`
+		SELECT (SELECT COUNT(*) FROM books),
+		       (SELECT COALESCE(SUM(copies_total), 0) FROM books),
+		       (SELECT COUNT(*) FROM readers),
+		       COUNT(*) FILTER (WHERE returned_at IS NULL),
+		       COUNT(*) FILTER (WHERE returned_at IS NULL AND due_at < now())
+		FROM loans`).
+		Scan(&st.Titles, &st.Copies, &st.Readers, &st.ActiveLoans, &st.OverdueLoans)
+	return st, err
 }
 
-func (s *Store) authorName(id int) string {
-	for _, a := range s.d.Authors {
-		if a.ID == id {
-			return a.Name
-		}
-	}
-	return "—"
+const bookSelect = `
+	SELECT b.book_id, b.title, b.author_id, b.genre_id, b.publication_year,
+	       COALESCE(b.isbn, ''), COALESCE(b.description, ''), b.copies_total,
+	       a.full_name, g.name,
+	       b.copies_total - COUNT(l.loan_id) AS available
+	FROM books b
+	JOIN authors a ON a.author_id = b.author_id
+	JOIN genres  g ON g.genre_id  = b.genre_id
+	LEFT JOIN loans l ON l.book_id = b.book_id AND l.returned_at IS NULL`
+
+type scanner interface{ Scan(dest ...any) error }
+
+func scanBook(r scanner) (BookView, error) {
+	var v BookView
+	err := r.Scan(&v.ID, &v.Title, &v.AuthorID, &v.GenreID, &v.Year, &v.ISBN, &v.Description,
+		&v.Copies, &v.Author, &v.Genre, &v.Available)
+	return v, err
 }
 
-func (s *Store) genreName(id int) string {
-	for _, g := range s.d.Genres {
-		if g.ID == id {
-			return g.Name
-		}
-	}
-	return "—"
-}
 
-func (s *Store) bookView(b Book) BookView {
-	return BookView{
-		Book: b, Author: s.authorName(b.AuthorID), Genre: s.genreName(b.GenreID),
-		Available: b.Copies - s.activeLoansOfBook(b.ID),
+func (s *Store) Books(query string, genreID int) ([]BookView, error) {
+	var where []string
+	var args []any
+	if genreID > 0 {
+		args = append(args, genreID)
+		where = append(where, fmt.Sprintf("b.genre_id = $%d", len(args)))
 	}
-}
+	if strings.TrimSpace(query) != "" {
+		args = append(args, likePattern(query))
+		where = append(where, fmt.Sprintf("(b.title ILIKE $%[1]d OR a.full_name ILIKE $%[1]d)", len(args)))
+	}
+	q := bookSelect
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " GROUP BY b.book_id, a.full_name, g.name ORDER BY lower(b.title), b.book_id"
 
-func (s *Store) findBook(id int) (Book, bool) {
-	for _, b := range s.d.Books {
-		if b.ID == id {
-			return b, true
-		}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
 	}
-	return Book{}, false
-}
-
-func (s *Store) findReader(id int) (Reader, bool) {
-	for _, r := range s.d.Readers {
-		if r.ID == id {
-			return r, true
-		}
-	}
-	return Reader{}, false
-}
-
-func (s *Store) loanView(l Loan) LoanView {
-	v := LoanView{Loan: l, BookTitle: "(книга удалена)", ReaderName: "(читатель удалён)"}
-	if b, ok := s.findBook(l.BookID); ok {
-		v.BookTitle = b.Title
-	}
-	if r, ok := s.findReader(l.ReaderID); ok {
-		v.ReaderName, v.ReaderTicket = r.FullName, r.Ticket
-	}
-	v.Overdue = l.ReturnedAt == nil && time.Now().After(l.DueAt)
-	return v
-}
-
-func (s *Store) Genres() []Genre {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]Genre(nil), s.d.Genres...)
-}
-
-func (s *Store) Stats() Stats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	st := Stats{Titles: len(s.d.Books), Readers: len(s.d.Readers)}
-	for _, b := range s.d.Books {
-		st.Copies += b.Copies
-	}
-	now := time.Now()
-	for _, l := range s.d.Loans {
-		if l.ReturnedAt == nil {
-			st.ActiveLoans++
-			if now.After(l.DueAt) {
-				st.OverdueLoans++
-			}
-		}
-	}
-	return st
-}
-
-func (s *Store) Books(query string, genreID int) []BookView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	q := strings.ToLower(strings.TrimSpace(query))
+	defer rows.Close()
 	var out []BookView
-	for _, b := range s.d.Books {
-		if genreID > 0 && b.GenreID != genreID {
-			continue
-		}
-		v := s.bookView(b)
-		if q != "" && !strings.Contains(strings.ToLower(v.Title), q) &&
-			!strings.Contains(strings.ToLower(v.Author), q) {
-			continue
+	for rows.Next() {
+		v, err := scanBook(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return strings.ToLower(out[i].Title) < strings.ToLower(out[j].Title)
-	})
-	return out
+	return out, rows.Err()
 }
 
-func (s *Store) Book(id int) (BookView, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	b, ok := s.findBook(id)
-	if !ok {
-		return BookView{}, false
+
+func (s *Store) Book(id int) (v BookView, ok bool, err error) {
+	v, err = scanBook(s.db.QueryRow(bookSelect+` WHERE b.book_id = $1 GROUP BY b.book_id, a.full_name, g.name`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return v, false, nil
 	}
-	return s.bookView(b), true
+	return v, err == nil, err
 }
 
-func (s *Store) Readers(query string) []ReaderView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	q := strings.ToLower(strings.TrimSpace(query))
+
+const readerSelect = `
+	SELECT r.reader_id, r.ticket_number, r.full_name, COALESCE(r.phone, ''), COALESCE(r.email, ''),
+	       r.registered_at, COUNT(l.loan_id)
+	FROM readers r
+	LEFT JOIN loans l ON l.reader_id = r.reader_id AND l.returned_at IS NULL`
+
+func scanReader(r scanner) (ReaderView, error) {
+	var v ReaderView
+	err := r.Scan(&v.ID, &v.Ticket, &v.FullName, &v.Phone, &v.Email, &v.RegisteredAt, &v.Active)
+	return v, err
+}
+
+func (s *Store) Readers(query string) ([]ReaderView, error) {
+	q := readerSelect
+	var args []any
+	if strings.TrimSpace(query) != "" {
+		q += " WHERE r.full_name ILIKE $1 OR r.ticket_number ILIKE $1"
+		args = append(args, likePattern(query))
+	}
+	q += " GROUP BY r.reader_id ORDER BY lower(r.full_name), r.reader_id"
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	var out []ReaderView
-	for _, r := range s.d.Readers {
-		if q != "" && !strings.Contains(strings.ToLower(r.FullName), q) &&
-			!strings.Contains(strings.ToLower(r.Ticket), q) {
-			continue
+	for rows.Next() {
+		v, err := scanReader(rows)
+		if err != nil {
+			return nil, err
 		}
-		n := 0
-		for _, l := range s.d.Loans {
-			if l.ReaderID == r.ID && l.ReturnedAt == nil {
-				n++
-			}
-		}
-		out = append(out, ReaderView{Reader: r, Active: n})
+		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return strings.ToLower(out[i].FullName) < strings.ToLower(out[j].FullName)
-	})
-	return out
+	return out, rows.Err()
 }
 
-func (s *Store) Reader(id int) (ReaderView, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	r, ok := s.findReader(id)
-	if !ok {
-		return ReaderView{}, false
+func (s *Store) Reader(id int) (v ReaderView, ok bool, err error) {
+	v, err = scanReader(s.db.QueryRow(readerSelect+` WHERE r.reader_id = $1 GROUP BY r.reader_id`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return v, false, nil
 	}
-	n := 0
-	for _, l := range s.d.Loans {
-		if l.ReaderID == id && l.ReturnedAt == nil {
-			n++
-		}
-	}
-	return ReaderView{Reader: r, Active: n}, true
+	return v, err == nil, err
 }
 
-func (s *Store) Loans(readerID int, onlyActive bool) []LoanView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+
+func (s *Store) Loans(readerID int, onlyActive bool) ([]LoanView, error) {
+	rows, err := s.db.Query(`
+		SELECT l.loan_id, l.book_id, l.reader_id, l.issued_at, l.due_at, l.returned_at,
+		       b.title, r.full_name, r.ticket_number,
+		       (l.returned_at IS NULL AND l.due_at < now())
+		FROM loans l
+		JOIN books   b ON b.book_id   = l.book_id
+		JOIN readers r ON r.reader_id = l.reader_id
+		WHERE ($1::int = 0 OR l.reader_id = $1::int)
+		  AND (NOT $2::boolean OR l.returned_at IS NULL)
+		ORDER BY l.issued_at DESC, l.loan_id DESC`, readerID, onlyActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	var out []LoanView
-	for _, l := range s.d.Loans {
-		if readerID > 0 && l.ReaderID != readerID {
-			continue
+	for rows.Next() {
+		var v LoanView
+		var returned sql.NullTime
+		if err := rows.Scan(&v.ID, &v.BookID, &v.ReaderID, &v.IssuedAt, &v.DueAt, &returned,
+			&v.BookTitle, &v.ReaderName, &v.ReaderTicket, &v.Overdue); err != nil {
+			return nil, err
 		}
-		if onlyActive && l.ReturnedAt != nil {
-			continue
+		if returned.Valid {
+			t := returned.Time
+			v.ReturnedAt = &t
 		}
-		out = append(out, s.loanView(l))
+		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].IssuedAt.After(out[j].IssuedAt) })
-	return out
+	return out, rows.Err()
 }
+
 
 func cleanText(s string, max int) (string, bool) {
 	s = strings.Join(strings.Fields(s), " ")
@@ -409,60 +367,51 @@ func (s *Store) AddBook(title, author string, genreID, year, copies int, isbn, d
 		return 0, userErr("Количество экземпляров должно быть от 1 до 1000.")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	genreOK := false
-	for _, g := range s.d.Genres {
-		if g.ID == genreID {
-			genreOK = true
-		}
-	}
-	if !genreOK {
-		return 0, userErr("Выберите жанр из списка.")
-	}
-
-	authorID := 0
-	for _, a := range s.d.Authors {
-		if strings.EqualFold(a.Name, author) {
-			authorID = a.ID
-			break
-		}
-	}
-	if authorID == 0 {
-		authorID = s.next("author")
-		s.d.Authors = append(s.d.Authors, Author{authorID, author})
-	}
-	id := s.next("book")
-	s.d.Books = append(s.d.Books, Book{
-		ID: id, Title: title, AuthorID: authorID, GenreID: genreID,
-		Year: year, ISBN: isbn, Description: desc, Copies: copies,
-	})
-	if err := s.commit(); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
 		return 0, err
 	}
-	return id, nil
+	defer tx.Rollback()
+
+
+	var authorID int
+	err = tx.QueryRow(`SELECT author_id FROM authors WHERE lower(full_name) = lower($1)`, author).Scan(&authorID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRow(`
+			INSERT INTO authors (full_name) VALUES ($1)
+			ON CONFLICT (full_name) DO UPDATE SET full_name = EXCLUDED.full_name
+			RETURNING author_id`, author).Scan(&authorID)
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	var id int
+	err = tx.QueryRow(`
+		INSERT INTO books (title, author_id, genre_id, publication_year, isbn, description, copies_total)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7)
+		RETURNING book_id`, title, authorID, genreID, year, isbn, desc, copies).Scan(&id)
+	if pgCode(err) == codeForeignKey {
+		return 0, userErr("Выберите жанр из списка.")
+	}
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 func (s *Store) DeleteBook(id int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	idx := -1
-	for i, b := range s.d.Books {
-		if b.ID == id {
-			idx = i
-		}
+	res, err := s.db.Exec(`DELETE FROM books WHERE book_id = $1`, id)
+	if pgCode(err) == codeForeignKey {
+		return userErr("Нельзя удалить книгу: по ней есть записи о выдаче.")
 	}
-	if idx < 0 {
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
 		return userErr("Книга не найдена.")
 	}
-	for _, l := range s.d.Loans {
-		if l.BookID == id {
-			return userErr("Нельзя удалить книгу: по ней есть записи о выдаче.")
-		}
-	}
-	s.d.Books = append(s.d.Books[:idx], s.d.Books[idx+1:]...)
-	return s.commit()
+	return nil
 }
 
 func (s *Store) AddReader(fullName, phone, email string) (int, error) {
@@ -478,74 +427,98 @@ func (s *Store) AddReader(fullName, phone, email string) (int, error) {
 		return 0, userErr("Укажите корректный адрес электронной почты или оставьте поле пустым.")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := s.next("reader")
-	s.d.Readers = append(s.d.Readers, Reader{
-		ID: id, Ticket: ticketNumber(id), FullName: fullName,
-		Phone: phone, Email: email, RegisteredAt: time.Now(),
-	})
-	if err := s.commit(); err != nil {
-		return 0, err
-	}
-	return id, nil
+	var id int
+	err := s.db.QueryRow(`
+		WITH n AS (SELECT nextval(pg_get_serial_sequence('readers', 'reader_id')) AS id)
+		INSERT INTO readers (reader_id, ticket_number, full_name, phone, email)
+		SELECT id, 'ЧБ-' || lpad(id::text, 5, '0'), $1, NULLIF($2, ''), NULLIF($3, '') FROM n
+		RETURNING reader_id`, fullName, phone, email).Scan(&id)
+	return id, err
 }
 
-func (s *Store) IssueBook(bookID, readerID int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	book, ok := s.findBook(bookID)
-	if !ok {
+func (s *Store) IssueBook(bookID, readerID int) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var copies int
+	err = tx.QueryRow(`SELECT copies_total FROM books WHERE book_id = $1 FOR UPDATE`, bookID).Scan(&copies)
+	if errors.Is(err, sql.ErrNoRows) {
 		return userErr("Выберите книгу из списка.")
 	}
-	if _, ok := s.findReader(readerID); !ok {
-		return userErr("Выберите читателя из списка.")
+	if err != nil {
+		return err
 	}
 
-	now := time.Now()
-	active, overdue := 0, false
-	for _, l := range s.d.Loans {
-		if l.ReaderID != readerID || l.ReturnedAt != nil {
-			continue
-		}
-		active++
-		if l.BookID == bookID {
-			return userErr("Эта книга уже числится за читателем.")
-		}
-		if now.After(l.DueAt) {
-			overdue = true
-		}
+	var one int
+	err = tx.QueryRow(`SELECT 1 FROM readers WHERE reader_id = $1 FOR UPDATE`, readerID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return userErr("Выберите читателя из списка.")
 	}
+	if err != nil {
+		return err
+	}
+
+
+	var active int
+	var overdue, same bool
+	err = tx.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(bool_or(due_at < now()), false),
+		       COALESCE(bool_or(book_id = $2), false)
+		FROM loans WHERE reader_id = $1 AND returned_at IS NULL`, readerID, bookID).Scan(&active, &overdue, &same)
+	if err != nil {
+		return err
+	}
+
+	var taken int 
+	err = tx.QueryRow(`SELECT COUNT(*) FROM loans WHERE book_id = $1 AND returned_at IS NULL`, bookID).Scan(&taken)
+	if err != nil {
+		return err
+	}
+
 	switch {
+	case same:
+		return userErr("Эта книга уже числится за читателем.")
 	case overdue:
 		return userErr("У читателя есть просроченные книги — выдача невозможна.")
 	case active >= MaxActiveLoans:
 		return userErr("Лимит выдачи: у читателя уже %d книг на руках.", MaxActiveLoans)
-	case book.Copies-s.activeLoansOfBook(bookID) <= 0:
+	case copies-taken <= 0:
 		return userErr("Свободных экземпляров этой книги нет.")
 	}
 
+	now := time.Now()
 	due := time.Date(now.Year(), now.Month(), now.Day()+LoanDays, 23, 59, 59, 0, now.Location())
-	s.d.Loans = append(s.d.Loans, Loan{
-		ID: s.next("loan"), BookID: bookID, ReaderID: readerID, IssuedAt: now, DueAt: due,
-	})
-	return s.commit()
+	_, err = tx.Exec(`INSERT INTO loans (book_id, reader_id, due_at) VALUES ($1, $2, $3)`, bookID, readerID, due)
+	if pgCode(err) == codeUnique { 
+		return userErr("Эта книга уже числится за читателем.")
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ReturnLoan(loanID int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.d.Loans {
-		if s.d.Loans[i].ID != loanID {
-			continue
-		}
-		if s.d.Loans[i].ReturnedAt != nil {
-			return userErr("Эта книга уже возвращена.")
-		}
-		t := time.Now()
-		s.d.Loans[i].ReturnedAt = &t
-		return s.commit()
+	res, err := s.db.Exec(`UPDATE loans SET returned_at = now() WHERE loan_id = $1 AND returned_at IS NULL`, loanID)
+	if err != nil {
+		return err
 	}
-	return userErr("Запись о выдаче не найдена.")
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+
+	var returned bool
+	err = s.db.QueryRow(`SELECT returned_at IS NOT NULL FROM loans WHERE loan_id = $1`, loanID).Scan(&returned)
+	if errors.Is(err, sql.ErrNoRows) {
+		return userErr("Запись о выдаче не найдена.")
+	}
+	if err != nil {
+		return err
+	}
+	return userErr("Эта книга уже возвращена.")
 }

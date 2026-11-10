@@ -34,6 +34,7 @@ var adminNav = []NavItem{
 	{"/loans", "Выдача", "loans"},
 }
 
+// Page — данные, доступные в каждом шаблоне.
 type Page struct {
 	Title   string
 	Active  string
@@ -57,7 +58,8 @@ type App struct {
 
 func main() {
 	addr := flag.String("addr", env("LIBRARY_ADDR", ":8080"), "адрес сервера")
-	dataPath := flag.String("data", env("LIBRARY_DATA", "data/library.json"), "файл данных")
+	dsn := flag.String("db", env("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/library?sslmode=disable"),
+		"адрес подключения к PostgreSQL")
 	flag.Parse()
 
 	password := os.Getenv("LIBRARY_PASSWORD")
@@ -66,7 +68,7 @@ func main() {
 		log.Println("ВНИМАНИЕ: пароль библиотекаря по умолчанию — «admin». Задайте LIBRARY_PASSWORD.")
 	}
 
-	store, err := OpenStore(*dataPath)
+	store, err := OpenStore(*dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -289,9 +291,18 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	redirect(w, r, "/", "Вы вышли из режима библиотекаря.", "")
 }
 
+func (a *App) serverError(w http.ResponseWriter, r *http.Request, err error) {
+	log.Println("ошибка:", err)
+	a.fail(w, r, http.StatusInternalServerError, "Внутренняя ошибка. Попробуйте ещё раз позже.")
+}
 
 func (a *App) home(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, "home", "Главная", "home", a.store.Stats(), http.StatusOK)
+	st, err := a.store.Stats()
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	a.render(w, r, "home", "Главная", "home", st, http.StatusOK)
 }
 
 func (a *App) about(w http.ResponseWriter, r *http.Request) {
@@ -301,13 +312,27 @@ func (a *App) about(w http.ResponseWriter, r *http.Request) {
 func (a *App) books(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	genre := atoi(r.URL.Query().Get("genre"))
+	books, err := a.store.Books(q, genre)
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	genres, err := a.store.Genres()
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
 	a.render(w, r, "books", "Книги", "books", map[string]any{
-		"Books": a.store.Books(q, genre), "Genres": a.store.Genres(), "Q": q, "Genre": genre,
+		"Books": books, "Genres": genres, "Q": q, "Genre": genre,
 	}, http.StatusOK)
 }
 
 func (a *App) book(w http.ResponseWriter, r *http.Request) {
-	b, ok := a.store.Book(pathID(r))
+	b, ok, err := a.store.Book(pathID(r))
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
 	if !ok {
 		a.fail(w, r, http.StatusNotFound, "Книга не найдена.")
 		return
@@ -316,9 +341,16 @@ func (a *App) book(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) bookNewForm(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, "book_new", "Новая книга", "books", map[string]any{
-		"Genres": a.store.Genres(), "F": map[string]string{"Copies": "1"},
-	}, http.StatusOK)
+	a.renderBookForm(w, r, map[string]string{"Copies": "1"}, http.StatusOK)
+}
+
+func (a *App) renderBookForm(w http.ResponseWriter, r *http.Request, f map[string]string, status int) {
+	genres, err := a.store.Genres()
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	a.render(w, r, "book_new", "Новая книга", "books", map[string]any{"Genres": genres, "F": f}, status)
 }
 
 func (a *App) bookNew(w http.ResponseWriter, r *http.Request) {
@@ -331,15 +363,10 @@ func (a *App) bookNew(w http.ResponseWriter, r *http.Request) {
 	id, err := a.store.AddBook(f["Title"], f["Author"], atoi(f["Genre"]), atoi(f["Year"]),
 		atoi(f["Copies"]), f["ISBN"], f["Description"])
 	if err != nil {
-		if !IsUserErr(err) {
-			log.Println(err)
-		}
 		q := r.URL.Query()
 		q.Set("err", msgOf(err))
 		r.URL.RawQuery = q.Encode()
-		a.render(w, r, "book_new", "Новая книга", "books", map[string]any{
-			"Genres": a.store.Genres(), "F": f,
-		}, http.StatusUnprocessableEntity)
+		a.renderBookForm(w, r, f, http.StatusUnprocessableEntity)
 		return
 	}
 	redirect(w, r, "/books/"+strconv.Itoa(id), "Книга добавлена в каталог.", "")
@@ -356,9 +383,12 @@ func (a *App) bookDelete(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) readers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
-	a.render(w, r, "readers", "Читатели", "readers", map[string]any{
-		"Readers": a.store.Readers(q), "Q": q,
-	}, http.StatusOK)
+	readers, err := a.store.Readers(q)
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	a.render(w, r, "readers", "Читатели", "readers", map[string]any{"Readers": readers, "Q": q}, http.StatusOK)
 }
 
 func (a *App) readerNewForm(w http.ResponseWriter, r *http.Request) {
@@ -382,51 +412,66 @@ func (a *App) readerNew(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) reader(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
-	rd, ok := a.store.Reader(id)
+	rd, ok, err := a.store.Reader(id)
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
 	if !ok {
 		a.fail(w, r, http.StatusNotFound, "Читатель не найден.")
 		return
 	}
-	a.render(w, r, "reader", rd.FullName, "readers", map[string]any{
-		"Reader": rd, "Loans": a.store.Loans(id, false),
-	}, http.StatusOK)
+	loans, err := a.store.Loans(id, false)
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	a.render(w, r, "reader", rd.FullName, "readers", map[string]any{"Reader": rd, "Loans": loans}, http.StatusOK)
 }
 
 func (a *App) loans(w http.ResponseWriter, r *http.Request) {
 	all := r.URL.Query().Get("all") == "1"
-	a.render(w, r, "loans", "Выдача книг", "loans", map[string]any{
-		"Loans": a.store.Loans(0, !all), "All": all,
-	}, http.StatusOK)
+	loans, err := a.store.Loans(0, !all)
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	a.render(w, r, "loans", "Выдача книг", "loans", map[string]any{"Loans": loans, "All": all}, http.StatusOK)
 }
 
-func (a *App) loanFormData(bookID, readerID int) map[string]any {
+func (a *App) renderLoanForm(w http.ResponseWriter, r *http.Request, bookID, readerID, status int) {
+	all, err := a.store.Books("", 0)
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
 	var books []BookView
-	for _, b := range a.store.Books("", 0) {
+	for _, b := range all {
 		if b.Available > 0 {
 			books = append(books, b)
 		}
 	}
-	return map[string]any{
-		"Books": books, "Readers": a.store.Readers(""), "Book": bookID, "Reader": readerID,
-		"Days": LoanDays,
+	readers, err := a.store.Readers("")
+	if err != nil {
+		a.serverError(w, r, err)
+		return
 	}
+	a.render(w, r, "loan_new", "Выдать книгу", "loans", map[string]any{
+		"Books": books, "Readers": readers, "Book": bookID, "Reader": readerID, "Days": LoanDays,
+	}, status)
 }
 
 func (a *App) loanNewForm(w http.ResponseWriter, r *http.Request) {
-	a.render(w, r, "loan_new", "Выдать книгу", "loans",
-		a.loanFormData(atoi(r.URL.Query().Get("book")), atoi(r.URL.Query().Get("reader"))), http.StatusOK)
+	a.renderLoanForm(w, r, atoi(r.URL.Query().Get("book")), atoi(r.URL.Query().Get("reader")), http.StatusOK)
 }
 
 func (a *App) loanNew(w http.ResponseWriter, r *http.Request) {
 	bookID, readerID := atoi(r.FormValue("book")), atoi(r.FormValue("reader"))
 	if err := a.store.IssueBook(bookID, readerID); err != nil {
-		if !IsUserErr(err) {
-			log.Println(err)
-		}
 		q := r.URL.Query()
 		q.Set("err", msgOf(err))
 		r.URL.RawQuery = q.Encode()
-		a.render(w, r, "loan_new", "Выдать книгу", "loans", a.loanFormData(bookID, readerID), http.StatusUnprocessableEntity)
+		a.renderLoanForm(w, r, bookID, readerID, http.StatusUnprocessableEntity)
 		return
 	}
 	redirect(w, r, "/loans", "Книга выдана.", "")

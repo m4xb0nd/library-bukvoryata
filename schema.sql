@@ -25,16 +25,16 @@ CREATE TABLE readers (
     full_name      VARCHAR(150) NOT NULL,
     phone          VARCHAR(30),
     email          VARCHAR(100),
-    registered_at  TIMESTAMP    NOT NULL DEFAULT now()
+    registered_at  TIMESTAMPTZ   NOT NULL DEFAULT now()
 );
 
 CREATE TABLE loans (
     loan_id      SERIAL    PRIMARY KEY,
     book_id      INTEGER   NOT NULL REFERENCES books (book_id)     ON DELETE RESTRICT,
     reader_id    INTEGER   NOT NULL REFERENCES readers (reader_id) ON DELETE RESTRICT,
-    issued_at    TIMESTAMP NOT NULL DEFAULT now(),
-    due_at       TIMESTAMP NOT NULL,               
-    returned_at  TIMESTAMP,                       
+    issued_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    due_at       TIMESTAMPTZ NOT NULL,            
+    returned_at  TIMESTAMPTZ,                    
     CHECK (due_at > issued_at),
     CHECK (returned_at IS NULL OR returned_at >= issued_at)
 );
