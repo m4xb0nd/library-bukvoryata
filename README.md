@@ -17,7 +17,7 @@ docker compose up --build        # сайт: http://localhost:8080
 ```bash
 createdb library                 # или создайте базу library в pgAdmin / Toad
 export DATABASE_URL="postgres://postgres:ПАРОЛЬ@localhost:5432/library?sslmode=disable"
-export LIBRARY_PASSWORD=12345
+export LIBRARY_PASSWORD=ваш_пароль
 go run .                         # сайт: http://localhost:8080
 ```
 
